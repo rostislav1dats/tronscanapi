@@ -1,0 +1,4 @@
+.env
+tronvenv/
+.pytest_cache/
+__pycache__/

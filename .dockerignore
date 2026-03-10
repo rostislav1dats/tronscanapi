@@ -1,0 +1,45 @@
+# Git
+.git
+.gitignore
+
+# Python кэш
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+dist
+build
+.eggs
+
+# Виртуальные окружения
+.venv
+venv
+env
+
+# Тесты и покрытие (не нужны в финальном образе — копируются только в stage tester)
+.pytest_cache
+.coverage
+htmlcov
+coverage.xml
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Секреты (никогда не копировать в образ)
+.env
+*.pem
+*.key
+
+# Docker
+Dockerfile*
+docker-compose*
+.dockerignore

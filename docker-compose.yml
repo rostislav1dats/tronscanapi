@@ -1,0 +1,44 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tron-wallet-service:latest
+    container_name: tron-wallet-service
+
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+
+    env_file:
+      - .env
+
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+    # Политика перезапуска
+    restart: unless-stopped
+
+    # Healthcheck — Docker проверяет /health каждые 30 сек
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+    # Ограничения ресурсов (опционально — раскомментируй при необходимости)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "1.0"
+    #       memory: 512M
+    #     reservations:
+    #       memory: 128M
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
