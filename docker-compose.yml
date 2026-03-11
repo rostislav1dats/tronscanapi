@@ -7,7 +7,7 @@ services:
     container_name: tron-wallet-service
 
     ports:
-      - "${HOST_PORT:-8000}:8000"
+      - "2.56.179.238:${HOST_PORT:-8000}:8000"
 
     env_file:
       - .env

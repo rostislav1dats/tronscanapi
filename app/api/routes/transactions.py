@@ -16,6 +16,13 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.utils.dependencies import (
+    parse_get_transactions_after_hash_request,
+    parse_get_transactions_between_request,
+    parse_get_transactions_request,
+    parse_get_transactions_stats_request,
+)
+
 from app.core.exceptions import (
     InvalidWalletAddressError,
     TransactionNotFoundError,
@@ -68,7 +75,7 @@ def _get_service(client: TronGridClient) -> TransactionService:
     },
 )
 async def get_transactions(
-    body: GetTransactionsRequest,
+    body: GetTransactionsRequest = Depends(parse_get_transactions_request),
     auth: ApiKeyInfo = Depends(verify_api_key),
 ) -> GetTransactionsResponse:
     """
@@ -123,7 +130,7 @@ async def get_transactions(
     },
 )
 async def get_transactions_between(
-    body: GetTransactionsBetweenRequest,
+    body: GetTransactionsBetweenRequest = Depends(parse_get_transactions_between_request),
     auth: ApiKeyInfo = Depends(verify_api_key),
 ) -> GetTransactionsBetweenResponse:
     """
@@ -183,7 +190,7 @@ async def get_transactions_between(
     },
 )
 async def get_transactions_stats(
-    body: GetTransactionsStatsRequest,
+    body: GetTransactionsStatsRequest = Depends(parse_get_transactions_stats_request),
     auth: ApiKeyInfo = Depends(verify_api_key),
 ) -> GetTransactionsStatsResponse:
     """
@@ -241,7 +248,7 @@ async def get_transactions_stats(
     },
 )
 async def get_transactions_after_hash(
-    body: GetTransactionsAfterHashRequest,
+    body: GetTransactionsAfterHashRequest = Depends(parse_get_transactions_after_hash_request),
     auth: ApiKeyInfo = Depends(verify_api_key),
 ) -> GetTransactionsAfterHashResponse:
     """
