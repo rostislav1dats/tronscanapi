@@ -70,6 +70,85 @@ class TronGridClient:
             await self._client.aclose()
             logger.debug("Соединение закрыто")
 
+    # async def _get_with_retry(
+    #     self,
+    #     url: str,
+    #     params: dict | None = None,
+    #     wallet: str = "",
+    # ) -> httpx.Response:
+    #     """GET-запрос с автоматическим retry при HTTP 429."""
+    #     for attempt in range(settings.HTTP_MAX_RETRIES + 1):
+    #         try:
+    #             response = await self._client.get(url, params=params)  # type: ignore[union-attr]
+    #         except httpx.TimeoutException as exc:
+    #             logger.error("TronGrid: таймаут при запросе кошелька %s: %s", wallet, exc)
+    #             raise TronNetworkError(
+    #                 f"Таймаут при запросе транзакций кошелька {wallet}"
+    #             ) from exc
+    #         except httpx.RequestError as exc:
+    #             logger.error("TronGrid: сетевая ошибка кошелька %s: %s", wallet, exc)
+    #             raise TronNetworkError(f"Сетевая ошибка: {exc}") from exc
+
+    #         if response.status_code == 429:
+    #             if attempt < settings.HTTP_MAX_RETRIES:
+    #                 wait = settings.HTTP_TIMEOUT_SECONDS * (attempt + 1)
+    #                 logger.warning(
+    #                     "TronGrid: 429 Rate Limit (кошелёк=%s, попытка %d/%d). "
+    #                     "Ждём %.0f сек...",
+    #                     wallet, attempt + 1, settings.HTTP_MAX_RETRIES, wait,
+    #                 )
+    #                 await asyncio.sleep(wait)
+    #                 continue
+    #             else:
+    #                 raise TronGridAPIError(response.text, status_code=429)
+
+    #         if response.status_code == 400:
+    #             logger.warning("TronGrid: 400 Bad Request для кошелька %s", wallet)
+    #             raise InvalidWalletAddressError(wallet)
+
+    #         if not response.is_success:
+    #             raise TronGridAPIError(response.text, status_code=response.status_code)
+
+    #         return response
+
+    #     raise TronGridAPIError("Превышено количество попыток при rate limit", status_code=429)
+    
+    # async def _post_with_retry(
+    #     self,
+    #     url: str,
+    #     json: dict | None = None,
+    # ) -> httpx.Response:
+    #     """POST-запрос с автоматическим retry при HTTP 429."""
+    #     for attempt in range(settings.HTTP_MAX_RETRIES + 1):
+    #         try:
+    #             response = await self._client.post(url, json=json)  # type: ignore[union-attr]
+    #         except httpx.TimeoutException as exc:
+    #             raise TronNetworkError(f"Таймаут при поиске транзакции") from exc
+    #         except httpx.RequestError as exc:
+    #             raise TronNetworkError(f"Сетевая ошибка: {exc}") from exc
+
+    #         if response.status_code == 429:
+    #             if attempt < settings.HTTP_MAX_RETRIES:
+    #                 wait = settings.HTTP_TIMEOUT_SECONDS * (attempt + 1)
+    #                 logger.warning(
+    #                     "TronGrid: 429 Rate Limit (попытка %d/%d). Ждём %.0f сек...",
+    #                     attempt + 1, settings.HTTP_MAX_RETRIES, wait,
+    #                 )
+    #                 await asyncio.sleep(wait)
+    #                 continue
+    #             else:
+    #                 raise TronGridAPIError(response.text, status_code=429)
+
+    #         if response.status_code == 404:
+    #             return response  # caller обрабатывает 404 сам
+
+    #         if not response.is_success:
+    #             raise TronGridAPIError(response.text, status_code=response.status_code)
+
+    #         return response
+
+    #     raise TronGridAPIError("Превышено количество попыток при rate limit", status_code=429)
+
     async def get_trc20_transactions(self, wallet: str, start_timestamp: datetime | None = None, end_timestamp: datetime | None = None, min_timestamp_ms: int | None = None,) -> list[TransactionDTO]:
         """
         Возвращает все USDT TRC20-транзакции кошелька.
@@ -173,6 +252,35 @@ class TronGridClient:
 
         logger.info("TronGrid: загружено %d транзакция для %s (%d страниц)", len(transactions), wallet, page)
         return transactions
+    
+    async def get_usdt_balance(self, wallet: str) -> float:
+        """
+        Возвращает текущий баланс USDT (TRC20) кошелька.
+        Используется для определение является ли последняя транзакция 
+        "финальной" - то есть перевела ли она весь баланс на следующий кошелёк.
+        Args:
+            wallet: Адрес tron-кошелька
+        Returns:
+            Баланс USDT как float. 0.0 если токен не найден
+        """
+        self._ensure_client()
+        logger.debug("TronGrid: получение баланса USDT кошелька %s", wallet)
+
+        response = await self._client.get(
+            f"/v1/accounts/{wallet}"
+        )
+
+        data = response.json()
+        for token in data.get('data', [{}])[0].get('trc20', []):
+            if _USDT_CONTRACT in token:
+                raw = token[_USDT_CONTRACT]
+                balance = int(raw) / 1_000_000
+                logger.debug("TronGrid: баланс %s = %s USDT", wallet, balance)
+                return balance
+                
+        logger.debug("TronGrid: баланс %s = 0 USDT (токен не найден)", wallet)
+        return 0.0
+
 
     async def get_transaction_timestamp(self, tx_hash: str) -> int | None:
         """
@@ -220,6 +328,7 @@ class TronGridClient:
         ts = raw_list.get("timestamp")
         logger.debug("TronGrid: транзакция %s → timestamp=%s", tx_hash, ts)
         return int(ts) if ts is not None else None
+    
     
     def _ensure_client(self) -> None:
         """

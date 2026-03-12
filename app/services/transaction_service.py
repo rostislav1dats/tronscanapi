@@ -8,6 +8,17 @@
 - Фильтрация по направлению (between)
 - Агрегация сумм (stats)
 - Позиционирование по якорному хешу (after)
+- Построение цепочки кошельков: если с кошелька ушёл весь баланс —
+  продолжаем выборку по кошельку-получателю
+
+Алгоритм цепочки (применяется ко всем эндпоинтам для wallets/wallets1):
+  1. Получаем текущий баланс W через TronGrid /v1/accounts/{W}
+  2. Загружаем транзакции W в нужном диапазоне (от новых к старым)
+  3. Пересчитываем баланс на каждой транзакции в обратном порядке
+  4. Находим последнюю исходящую транзакцию W
+  5. Если баланс после неё = 0 → переходим на to_wallet этой транзакции
+     и повторяем с шага 1 начиная с timestamp перехода
+  6. Если баланс > 0 или транзакций больше нет → цепочка завершена
 
 TronGridClient инжектируется через конструктор — это позволяет
 легко подменить его моком в тестах.
@@ -15,7 +26,7 @@ TronGridClient инжектируется через конструктор — 
 
 import asyncio
 import logging 
-from datetime import datetime
+from datetime import datetime, UTC
 
 from app.core.exceptions import TransactionNotFoundError
 from app.models.schemas import TransactionDTO
@@ -23,6 +34,9 @@ from app.services.trongrid_client import TronGridClient
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+_ZERO_BALANCE_THRESHOLD = 0.000001
+# _ZERO_BALANCE_THRESHOLD = 1
 
 class TransactionService:
     """
@@ -46,10 +60,8 @@ class TransactionService:
         """
         Возвращает дедуплицированные и отсортированные транзакции для кошельков.
 
-        Запросы к TronGrid выполняются параллельно через asyncio.gather.
-        Дедупликация производится по tx_hash — одна и та же транзакция
-        может появиться в ответах TronGrid для кошелька-отправителя и
-        кошелька-получателя одновременно.
+        Для каждого кошелька из списка строится цепочка: если последняя
+        транзакция кошелька обнулила его баланс — продолжаем по получателю.
 
         Args:
             wallets: Список адресов TRON-кошельков (один или несколько).
@@ -60,7 +72,15 @@ class TransactionService:
             Уникальные транзакции, отсортированные по timestamp ASC.
         """
         logger.info("get_transactions: wallets=%s", wallets)
-        all_txs = await self._fetch_for_wallets(wallets, start_timestamp, end_timestamp)
+        all_txs: list[TransactionDTO] = []
+        for wallet in wallets:
+            chain_txs = await self._collect_chain(
+                start_wallet=wallet,
+                start_timestamp=start_timestamp,
+                end_timestamp=end_timestamp
+            )
+            all_txs.extend(chain_txs)
+        
         return _deduplicate_and_sort(all_txs)
     
     async def get_transactions_between(
@@ -73,39 +93,38 @@ class TransactionService:
         """
         Возвращает транзакции между группой wallets1 и одним wallet2.
 
-        Фильтрует только переводы, где участвуют обе стороны:
-        - from ∈ wallets1 И to == wallet2  (исходящие из wallets1)
-        - from == wallet2 И to ∈ wallets1  (входящие в wallets1)
-
-        Args:
-            wallets1: Список кошельков первой стороны.
-            wallet2: Кошелёк второй стороны.
-            start_timestamp: Начало фильтра.
-            end_timestamp: Конец фильтра.
-
-        Returns:
-            Отсортированные транзакции между двумя сторонами.
+        Цепочка строится только для wallets1. wallet2 остаётся неизменным.
         """
         logger.info(
             "get_transactions_between: wallets1=%s wallet2=%s", wallets1, wallet2
         )
-        all_wallets = list(set(wallets1 + [wallet2]))
-        all_txs = await self._fetch_for_wallets(all_wallets, start_timestamp, end_timestamp)
-        deduped = _deduplicate_and_sort(all_txs)
 
-        wallets1_set = {w.lower() for w in wallets1}
+        all_chain_txs: list[TransactionDTO] = []
+        visited_wallets = set()
+        
+        for w1 in wallets1:
+            chain_txs = await self._collect_chain(
+                start_wallet=w1,
+                start_timestamp=start_timestamp,
+                end_timestamp=end_timestamp,
+                visited=visited_wallets
+            )
+            all_chain_txs.extend(chain_txs)
+
+        # Дедуплицируем транзакции, собранные ТОЛЬКО по цепочке wallets1
+        deduped = _deduplicate_and_sort(all_chain_txs)
+
+        chain_set = {w.lower() for w in visited_wallets}
         wallet2_lower = wallet2.lower()
 
+        # Фильтруем: оставляем только те транзакции из цепочки, 
+        # где второй стороной был wallet2
         return [
             tx for tx in deduped
             if (
-                # wallets1 → wallet2
-                (tx.from_wallet.lower() in wallets1_set
-                 and tx.to_wallet.lower() == wallet2_lower)
+                (tx.from_wallet.lower() in chain_set and tx.to_wallet.lower() == wallet2_lower)
                 or
-                # wallet2 → wallets1
-                (tx.from_wallet.lower() == wallet2_lower
-                 and tx.to_wallet.lower() in wallets1_set)
+                (tx.from_wallet.lower() == wallet2_lower and tx.to_wallet.lower() in chain_set)
             )
         ]
     
@@ -135,20 +154,33 @@ class TransactionService:
             "get_transactions_stats: wallets1=%s wallets2=%s", wallets1, wallets2
         )
 
-        all_wallets = list(set(wallets1 + wallets2))
-        all_txs = await self._fetch_for_wallets(all_wallets, start_timestamp, end_timestamp)
-        deduped = _deduplicate_and_sort(all_txs)
+        all_chain_txs: list[TransactionDTO] = []
+        visited_wallets1 = set()
+        
+        for w1 in wallets1:
+            chain_txs = await self._collect_chain(
+                start_wallet=w1,
+                start_timestamp=start_timestamp,
+                end_timestamp=end_timestamp,
+                visited=visited_wallets1
+            )
+            all_chain_txs.extend(chain_txs)
 
-        w1_set = {w.lower() for w in wallets1}
+        # 2. Дедуплицируем транзакции, найденные в цепочке
+        deduped = _deduplicate_and_sort(all_chain_txs)
+
+        # 3. Подготавливаем сеты для быстрой фильтрации
+        w1_chain_set = {w.lower() for w in visited_wallets1}
         w2_set = {w.lower() for w in wallets2}
 
+        # 4. Считаем суммы, фильтруя только взаимодействия с wallets2
         w1_to_w2 = sum(
             tx.amount for tx in deduped
-            if tx.from_wallet.lower() in w1_set and tx.to_wallet.lower() in w2_set
+            if tx.from_wallet.lower() in w1_chain_set and tx.to_wallet.lower() in w2_set
         )
         w2_to_w1 = sum(
             tx.amount for tx in deduped
-            if tx.from_wallet.lower() in w2_set and tx.to_wallet.lower() in w1_set
+            if tx.from_wallet.lower() in w2_set and tx.to_wallet.lower() in w1_chain_set
         )
 
         return {
@@ -195,29 +227,23 @@ class TransactionService:
             "get_transactions_after_hash: wallets=%s tx_hash=%s", wallets, tx_hash
         )
 
-        # Шаг 1: получаем timestamp якоря — один быстрый запрос
         anchor_ts_ms = await self._client.get_transaction_timestamp(tx_hash)
-        print("="*80)
-        print(anchor_ts_ms)
-        print("="*80)
         if anchor_ts_ms is None:
             raise TransactionNotFoundError(tx_hash)
 
         logger.debug("Якорь найден: hash=%s timestamp_ms=%d", tx_hash, anchor_ts_ms)
 
-        # Шаг 2: загружаем транзакции начиная с момента якоря
-        # min_timestamp_ms передаётся напрямую в миллисекундах — TronGrid
-        # вернёт только транзакции >= anchor, пагинация минимальна
-        all_txs = await self._fetch_for_wallets_from_ms(wallets, anchor_ts_ms)
+        anchor_dt = datetime.fromtimestamp(anchor_ts_ms / 1000, tz=UTC)
+        all_txs: list[TransactionDTO] = []
+        for wallet in wallets:
+            chain_txs = await self._collect_chain(
+                start_wallet=wallet,
+                start_timestamp=anchor_dt,
+                anchor_hash=tx_hash
+            )
+            all_txs.extend(chain_txs)
 
-        # Шаг 3: убираем саму якорную транзакцию из результата
-        result = [tx for tx in all_txs if tx.tx_hash != tx_hash]
-
-        # Шаг 4: цепочки кошельков (ТЗ п.6)
-        known_wallets: set[str] = {w.lower() for w in wallets}
-        result = await self._expand_wallet_chains(result, known_wallets, anchor_ts_ms)
-
-        return _deduplicate_and_sort(result)
+        return _deduplicate_and_sort(all_txs)
 
     async def _expand_wallet_chains(
         self,
@@ -248,33 +274,189 @@ class TransactionService:
             known_wallets |= {w.lower() for w in new_wallets}
 
         return result
-    
-    async def _fetch_for_wallets_from_ms(
+        
+    async def _collect_chain(
         self,
-        wallets: list[str],
-        min_timestamp_ms: int,
+        start_wallet: str,
+        start_timestamp: datetime | None = None,
+        end_timestamp: datetime | None = None,
+        anchor_hash: str | None = None,
+        visited: set[str] | None = None,
     ) -> list[TransactionDTO]:
         """
-        Параллельная загрузка транзакций начиная с min_timestamp_ms.
-
-        Используется в /after — передаём миллисекунды напрямую в TronGrid
-        чтобы не грузить всю историю кошелька.
+        Рекурсивно собирает транзакции по цепочке кошельков.
+ 
+        Начинает с start_wallet, загружает его транзакции. Если последняя
+        исходящая транзакция обнулила баланс — переходит на кошелёк-получатель
+        и продолжает выборку с момента этого перехода.
+ 
+        Args:
+            start_wallet: Кошелёк с которого начинаем.
+            start_timestamp: Нижняя граница выборки (включительно).
+            end_timestamp: Верхняя граница выборки.
+            anchor_hash: Хеш якорной транзакции — исключается из результата.
+            visited: Множество уже посещённых кошельков (защита от циклов).
+ 
+        Returns:
+            Все транзакции цепочки начиная с start_wallet.
         """
-        tasks = [
-            self._client.get_trc20_transactions(
-                wallet, min_timestamp_ms=min_timestamp_ms
-            )
-            for wallet in wallets
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        if visited is None:
+            visited = set()
 
-        collected: list[TransactionDTO] = []
-        for wallet, result in zip(wallets, results):
-            if isinstance(result, Exception):
-                logger.error("Ошибка загрузки кошелька %s: %s", wallet, result)
+        wallet_lower = start_wallet.lower()
+        if wallet_lower in visited:
+            logger.warning("Цикл в цепочке кошельков: %s уже посещён", start_wallet)
+            return []
+        
+        visited.add(wallet_lower)
+
+        try:
+            current_balance = await self._client.get_usdt_balance(start_wallet)
+        except Exception as e:
+            logger.error("Не удалось получить баланс %s: %s", start_wallet, e)
+            current_balance = None
+
+        txs = await self._fetch_one_wallet(
+            start_wallet,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp
+        )
+
+        result = [tx for tx in txs if tx.tx_hash != anchor_hash]
+        if not txs:
+            return result
+        
+        # Ищем переход цепочки: последняя исходящая транзакция обнулила баланс
+        next_wallet, next_ts = self._find_chain_transaction(
+            txs=txs,
+            wallet=start_wallet,
+            current_balance=current_balance
+        )
+
+        if next_wallet is not None and next_ts is not None:
+            logger.info(
+                "Цепочка: %s → %s (с %s)", start_wallet, next_wallet, next_ts
+            )
+            next_txs = await self._collect_chain(
+                start_wallet=next_wallet,
+                start_timestamp=next_ts,
+                end_timestamp=end_timestamp,
+                anchor_hash=anchor_hash,
+                visited=visited
+            )
+            result.extend(next_txs)
+        
+        return result
+    
+    def _find_chain_transaction(
+            self, 
+            txs: list[TransactionDTO],
+            wallet: str,
+            current_balance: float | None
+    ) -> tuple[str | None, datetime | None]:
+        """
+        Определяет переход цепочки: находит последнюю исходящую транзакцию
+        и проверяет обнулила ли она баланс кошелька.
+ 
+        Алгоритм:
+        - Идём от новых к старым, пересчитываем баланс в обратном направлении
+        - Если текущий баланс неизвестен — не можем определить переход
+        - Если после последней исходящей транзакции баланс = 0 → переход
+ 
+        Returns:
+            (next_wallet, transition_timestamp) или (None, None) если перехода нет.
+        """
+        if current_balance is None:
+            return None, None
+        
+        wallet_lower = wallet.lower()
+        sorted_txs = sorted(txs, key=lambda t: t.timestamp, reverse=True)
+
+        balance = current_balance
+        last_outgoing: TransactionDTO | None = None
+
+        for tx in sorted_txs:
+            is_outgoing = tx.from_wallet.lower() == wallet_lower
+
+            if is_outgoing:
+                balance += tx.amount
+                if last_outgoing is None:
+                    last_outgoing = tx
+            
             else:
-                collected.extend(result)
-        return collected
+                balance -= tx.amount
+
+        if last_outgoing is None:
+            return None, None
+        
+        balance_after = current_balance
+        for tx in sorted_txs:
+            if tx.timestamp > last_outgoing.timestamp:
+                if tx.from_wallet.lower() == wallet_lower:
+                    balance_after += tx.amount
+                else:
+                    balance_after -= tx.amount
+
+        logger.debug(
+            "Цепочка анализ %s: баланс после последней исходящей = %.6f USDT",
+            wallet, balance_after,
+        )
+
+        if balance_after <= _ZERO_BALANCE_THRESHOLD:
+            return last_outgoing.to_wallet, last_outgoing.timestamp
+        
+        return None, None
+    
+    async def _collect_chain_wallets(
+            self,
+            wallets: list[str],
+            start_timestamp: datetime | None,
+            end_timestamp: datetime | None
+    ) -> list[str]:
+        """
+        Возвращает все адреса кошельков в цепочке (без транзакций).
+ 
+        Используется в between/stats чтобы сначала определить полный
+        набор кошельков цепочки, а потом загрузить их транзакции.
+        """
+        all_chain_wallets: list[str] = []
+        visited: set[str] = set()
+ 
+        async def _walk(wallet: str) -> None:
+            wallet_lower = wallet.lower()
+            if wallet_lower in visited:
+                return
+            visited.add(wallet_lower)
+ 
+            if wallet not in all_chain_wallets:
+                all_chain_wallets.append(wallet)
+ 
+            try:
+                current_balance = await self._client.get_usdt_balance(wallet)
+            except Exception as e:
+                logger.error("Не удалось получить баланс %s: %s", wallet, e)
+                return
+ 
+            txs = await self._fetch_one_wallet(
+                wallet,
+                start_timestamp=start_timestamp,
+                end_timestamp=end_timestamp,
+            )
+ 
+            next_wallet, _ = self._find_chain_transaction(
+                txs=txs,
+                wallet=wallet,
+                current_balance=current_balance,
+            )
+ 
+            if next_wallet is not None:
+                logger.debug("Цепочка wallets: %s → %s", wallet, next_wallet)
+                await _walk(next_wallet)
+ 
+        for wallet in wallets:
+            await _walk(wallet)
+ 
+        return all_chain_wallets
     
     async def _fetch_one_wallet(
         self,
@@ -330,6 +512,33 @@ class TransactionService:
             else:
                 collected.extend(result)
 
+        return collected
+    
+    async def _fetch_for_wallets_from_ms(
+        self,
+        wallets: list[str],
+        min_timestamp_ms: int,
+    ) -> list[TransactionDTO]:
+        """
+        Параллельная загрузка транзакций начиная с min_timestamp_ms.
+
+        Используется в /after — передаём миллисекунды напрямую в TronGrid
+        чтобы не грузить всю историю кошелька.
+        """
+        tasks = [
+            self._client.get_trc20_transactions(
+                wallet, min_timestamp_ms=min_timestamp_ms
+            )
+            for wallet in wallets
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        collected: list[TransactionDTO] = []
+        for wallet, result in zip(wallets, results):
+            if isinstance(result, Exception):
+                logger.error("Ошибка загрузки кошелька %s: %s", wallet, result)
+            else:
+                collected.extend(result)
         return collected
     
 def _deduplicate_and_sort(transactions: list[TransactionDTO]) -> list[TransactionDTO]:
