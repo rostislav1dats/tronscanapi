@@ -157,3 +157,29 @@ class GetTransactionsAfterHashResponse(BaseModel):
     """ответ с транзакциями после указанного хеша."""
     wallets: list[str]
     transactions_after: list[TransactionDTO] = Field(description="Транзакции после якорной от старой к новой.")
+
+class GetTransactionsRawRequest(BaseModel):
+    """
+    Запрос на получение транзакций кошелька без построения цепочки.
+ 
+    В отличие от /transactions, этот эндпоинт возвращает только транзакции
+    указанных кошельков — без перехода на кошельки-получатели.
+    """
+    wallets: list[str] = Field(min_length=1, description='Один или несколько адресов кошельков TRON', examples=[["TXytKFZbjHY6fCDhCGnUR5rEeKHrPwTFJZ"]])
+    start_timestamp: datetime | None = Field(default=None, description="Начало временного диапазона (UTC).", examples=["2026-01-01T00:00:00Z"])
+    end_timestamp: datetime | None = Field(default=None, description="Конеч временного диапазона (UTC).", examples=["2026-03-01T00:00:00Z"])
+
+    @field_validator('wallets')
+    @classmethod
+    def wallets_not_empty_strings(cls, v: list[str]) -> list[str]:
+        for addr in v:
+            if not addr.strip():
+                raise ValueError("Адрес кошелька не может быть пустой строкой")
+        return [a.strip() for a in v]
+    
+class GetTransactionsRawResponse(BaseModel):
+    """Ответ с транзакциями без цепочки."""
+    wallets: list[str] = Field(description="Список запрошенных кошельков")
+    transactions: list[TransactionDTO] = Field(
+        description="Транзакции, отсортированные от старой к новой"
+    )

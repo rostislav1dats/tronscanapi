@@ -35,6 +35,7 @@ from app.models.schemas import (
     GetTransactionsBetweenRequest,
     GetTransactionsRequest,
     GetTransactionsStatsRequest,
+    GetTransactionsRawRequest
 )
 
 logger = logging.getLogger(__name__)
@@ -120,5 +121,13 @@ async def parse_get_transactions_after_hash_request(
     data = await _parse_body(request)
     try:
         return GetTransactionsAfterHashRequest.model_validate(data)
+    except ValidationError as exc:
+        raise RequestValidationError(errors=exc.errors()) from exc
+    
+async def parse_get_transactions_raw_request(request: Request) -> GetTransactionsRawRequest:
+    """Dependency для POST /transactions/raw — без цепочки."""
+    data = await _parse_body(request)
+    try:
+        return GetTransactionsRawRequest.model_validate(data)
     except ValidationError as exc:
         raise RequestValidationError(errors=exc.errors()) from exc

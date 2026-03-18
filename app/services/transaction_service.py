@@ -35,8 +35,8 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_ZERO_BALANCE_THRESHOLD = 0.000001
-# _ZERO_BALANCE_THRESHOLD = 1
+# _ZERO_BALANCE_THRESHOLD = 0.000001
+_ZERO_BALANCE_THRESHOLD = 1
 
 class TransactionService:
     """
@@ -81,6 +81,23 @@ class TransactionService:
             )
             all_txs.extend(chain_txs)
         
+        return _deduplicate_and_sort(all_txs)
+    
+    async def get_transactions_raw(
+            self,
+            wallets: list[str],
+            start_timestamp: datetime | None = None,
+            end_timestamp: datetime | None = None
+    ) -> list[TransactionDTO]:
+        """
+        Возвращает транзакции указанных кошельков БЕЗ построения цепочки.
+ 
+        В отличие от get_transactions, не переходит на кошельки-получатели
+        даже если баланс обнулился. Возвращает только то что есть по
+        переданным адресам.
+        """
+        logger.info(f'get_transactions_raw: wallets={wallets}')
+        all_txs = await self._fetch_for_wallets(wallets, start_timestamp, end_timestamp)
         return _deduplicate_and_sort(all_txs)
     
     async def get_transactions_between(
@@ -416,7 +433,7 @@ class TransactionService:
         """
         Возвращает все адреса кошельков в цепочке (без транзакций).
  
-        Используется в between/stats чтобы сначала определить полный
+        Используется в between /stats чтобы сначала определить полный
         набор кошельков цепочки, а потом загрузить их транзакции.
         """
         all_chain_wallets: list[str] = []

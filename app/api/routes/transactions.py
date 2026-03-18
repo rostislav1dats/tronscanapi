@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.utils.dependencies import (
     parse_get_transactions_after_hash_request,
     parse_get_transactions_between_request,
+    parse_get_transactions_raw_request,
     parse_get_transactions_request,
     parse_get_transactions_stats_request,
 )
@@ -35,6 +36,8 @@ from app.models.schemas import (
     GetTransactionsAfterHashResponse,
     GetTransactionsBetweenRequest,
     GetTransactionsBetweenResponse,
+    GetTransactionsRawRequest,
+    GetTransactionsRawResponse,
     GetTransactionsRequest,
     GetTransactionsResponse,
     GetTransactionsStatsRequest,
@@ -113,6 +116,46 @@ async def get_transactions(
             ) from exc
 
     return GetTransactionsResponse(wallets=body.wallets, transactions=txs)
+
+@router.post(
+        "/raw",
+        response_model=GetTransactionsRawResponse,
+        summary="Транзакции по кошелькам без построения цепочки",
+        description=(
+            "Возвращает USDT (TRC20) транзакции только для указанных кошельков "
+            "без перехода на кошельки-получатели.\n\n"
+            "В отличие от `POST /transactions`, не строит цепочку даже если баланс "
+            "кошелька обнулился.\n\n"
+            "**Принимает:** `application/json`, `multipart/form-data`, "
+            "`application/x-www-form-urlencoded`\n\n"
+            "**Требуется заголовок `X-API-Key`.**"
+        ),
+        responses={
+            401: {"description": "Отсутствует или неверный API-ключ"},
+            422: {"description": "Некорректный адрес кошелька"},
+            502: {"description": "Ошибка TronGrid API или сетевой сбой"},
+        },
+)
+async def get_transactions_raw(
+    body: GetTransactionsRawRequest = Depends(parse_get_transactions_raw_request),
+    auth: ApiKeyInfo = Depends(verify_api_key)
+) -> GetTransactionsRawResponse:
+    logger.info(f'POST /transactions/raw: owner={auth.owner} wallets={body.wallets}')
+    async with TronGridClient() as client:
+        service = _get_service(client)
+        try:
+            txs = await service.get_transactions_raw(
+                wallets=body.wallets,
+                start_timestamp=body.start_timestamp,
+                end_timestamp=body.end_timestamp
+            )
+        except InvalidWalletAddressError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except (TronGridAPIError, TronNetworkError) as exc:
+            logger.error(f'TronGrid error at /transactions/raw: {exc}', exc)
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        
+    return GetTransactionsRawResponse(wallets=body.wallets, transactions=txs)
 
 @router.post(
     "/between",
