@@ -210,6 +210,8 @@ class TransactionService:
         self,
         wallets: list[str],
         tx_hash: str,
+        start_timestamp: datetime | None = None,
+        end_timestamp: datetime | None = None,
     ) -> list[TransactionDTO]:
         """
         Возвращает все USDT-транзакции кошельков после указанной транзакции по хешу.
@@ -232,6 +234,8 @@ class TransactionService:
             wallets: Список начальных кошельков для поиска.
             tx_hash: Хеш транзакции-якоря (должна быть USDT TRC20-переводом
                      одного из переданных кошельков).
+            start_timestamp: Дополнительная нижняя граница (поверх якоря, UTC).
+            end_timestamp: Верхняя граница по времени (UTC).
 
         Returns:
             Транзакции после якорной от старой к новой, включая цепочку.
@@ -251,11 +255,19 @@ class TransactionService:
         logger.debug("Якорь найден: hash=%s timestamp_ms=%d", tx_hash, anchor_ts_ms)
 
         anchor_dt = datetime.fromtimestamp(anchor_ts_ms / 1000, tz=UTC)
+
+        # Нижняя граница — max(anchor_dt, start_timestamp) чтобы не возвращать
+        # транзакции раньше якоря даже если start_timestamp задан позже него
+        effective_start = anchor_dt
+        if start_timestamp is not None and start_timestamp > anchor_dt:
+            effective_start = start_timestamp
+
         all_txs: list[TransactionDTO] = []
         for wallet in wallets:
             chain_txs = await self._collect_chain(
                 start_wallet=wallet,
-                start_timestamp=anchor_dt,
+                start_timestamp=effective_start,
+                end_timestamp=end_timestamp,
                 anchor_hash=tx_hash
             )
             all_txs.extend(chain_txs)

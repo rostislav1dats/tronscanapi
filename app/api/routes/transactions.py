@@ -314,6 +314,8 @@ async def get_transactions_after_hash(
             txs = await service.get_transactions_after_hash(
                 wallets=body.wallets,
                 tx_hash=body.tx_hash,
+                start_timestamp=body.start_timestamp,
+                end_timestamp=body.end_timestamp,
             )
         except TransactionNotFoundError as exc:
             raise HTTPException(
